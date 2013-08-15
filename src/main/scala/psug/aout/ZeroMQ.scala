@@ -1,22 +1,64 @@
 package psug.aout
 
-import language.postfixOps
-import scala.concurrent.duration._
-import akka.actor.{ Actor, Props }
-import akka.util.ByteString
-import akka.testkit._
-import akka.zeromq.{ ZeroMQVersion, ZeroMQExtension, SocketType, Bind }
-import java.text.SimpleDateFormat
-import java.util.Date
-import akka.actor.ActorRef
-import akka.testkit.AkkaSpec
+import scala.concurrent.duration.DurationInt
+import scala.language.postfixOps
 import org.junit.runner.RunWith
+import akka.actor.{ Actor, ActorLogging, Props, actorRef2Scala }
+import akka.serialization.SerializationExtension
+import akka.testkit.AkkaSpec
+import akka.util.ByteString
+import akka.zeromq.{ Bind, Connect, Identity, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 import org.scalatest.junit.JUnitRunner
-import org.zeromq.ZeroMQLibrary
 
+/**
+ * Goal of the exercice:
+ * "have a administrator laptop be able to send
+ *  command to multiple servers and get their responses.
+ *  Client can come and go, the admin laptop is here
+ *  sure".
+ *
+ * As to not use server/service/client/etc naming, we
+ * say that:
+ * - Admin laptop will be called "admin".
+ * - Servers will be called "nodes".
+ *
+ * So, we want that an admin:
+ * - be able to send the same command to multiple nodes
+ * - get answer, asynchonously, from each node.
+ *
+ * The nodes are known by advance (a node can not pop
+ * from nowhere), but the list can chance for each run
+ * of the program. Ideally, a node could pop from
+ * nowhere and subscribes to the command-publisher
+ *
+ * At any time, a node can disappear. We want to have a
+ * trace a such a fact.
+ *
+ * We can think to at least two way of handling the problem:
+ *
+ * 1/ admin is a client to a bunch of service (one by node)
+ *
+ *    We can see that as a bunch of pairs:
+ *    - admin <-> node1
+ *    - admin <-> node2
+ *    - etc
+ *
+ *    That implies that when a node comes, it has some
+ *    way to inform the server that it exists. It can
+ *    be handled by the init script
+ *
+ * 2/ nodes subscribes to a command-publisher from node and
+ *    send back answer to a command-result-sink in admin
+ *
+ *
+ *
+ */
 object ZeromqDocSpec {
 
-  //#health
+
+
+
+
   import akka.zeromq._
   import akka.actor.Actor
   import akka.actor.Props
@@ -25,91 +67,9 @@ object ZeromqDocSpec {
   import java.lang.management.ManagementFactory
 
   case object Tick
-  case class Heap(timestamp: Long, used: Long, max: Long)
-  case class Load(timestamp: Long, loadAverage: Double)
 
   case class RepeatAfterMe(say: String)
   case class Answer(s:String)
-
-  class HealthProbe extends Actor {
-
-    val pubSocket = ZeroMQExtension(context.system).newSocket(SocketType.Pub, Bind("tcp://127.0.0.1:1235"))
-    val memory = ManagementFactory.getMemoryMXBean
-    val os = ManagementFactory.getOperatingSystemMXBean
-    val ser = SerializationExtension(context.system)
-
-    import context.dispatcher
-
-    override def preStart() {
-      context.system.scheduler.schedule(1 second, 1 second, self, Tick)
-    }
-
-    override def postRestart(reason: Throwable) {
-      // don't call preStart, only schedule once
-    }
-
-    def receive: Receive = {
-      case Tick =>
-        val currentHeap = memory.getHeapMemoryUsage
-        val timestamp = System.currentTimeMillis
-
-        // use akka SerializationExtension to convert to bytes
-        val heapPayload = ser.serialize(Heap(timestamp, currentHeap.getUsed, currentHeap.getMax)).get
-        // the first frame is the topic, second is the message
-        pubSocket ! ZMQMessage(ByteString("health.heap"), ByteString(heapPayload))
-
-        // use akka SerializationExtension to convert to bytes
-        val loadPayload = ser.serialize(Load(timestamp, os.getSystemLoadAverage)).get
-
-        // the first frame is the topic, second is the message
-        pubSocket ! ZMQMessage(ByteString("health.load"), ByteString(loadPayload))
-    }
-  }
-  //#health
-
-  //#logger
-  class Logger extends Actor with ActorLogging {
-
-    ZeroMQExtension(context.system).newSocket(SocketType.Sub, Listener(self), Connect("tcp://127.0.0.1:1235"), Subscribe("health"))
-
-    val ser = SerializationExtension(context.system)
-    val timestampFormat = new SimpleDateFormat("HH:mm:ss.SSS")
-
-    def receive = {
-      // the first frame is the topic, second is the message
-      case m: ZMQMessage if m.frames(0).utf8String == "health.heap" =>
-        val Heap(timestamp, used, max) = ser.deserialize(m.frames(1).toArray, classOf[Heap]).get
-        log.info("Used heap {} bytes, at {}", used, timestampFormat.format(new Date(timestamp)))
-
-      case m: ZMQMessage if m.frames(0).utf8String == "health.load" =>
-        val Load(timestamp, loadAverage) = ser.deserialize(m.frames(1).toArray, classOf[Load]).get
-        log.info("Load average {}, at {}", loadAverage, timestampFormat.format(new Date(timestamp)))
-    }
-  }
-  //#logger
-
-  //#alerter
-  class HeapAlerter extends Actor with ActorLogging {
-
-    ZeroMQExtension(context.system).newSocket(SocketType.Sub, Listener(self), Connect("tcp://127.0.0.1:1235"), Subscribe("health.heap"))
-    val ser = SerializationExtension(context.system)
-    var count = 0
-
-    def receive = {
-      // the first frame is the topic, second is the message
-      case m: ZMQMessage if m.frames(0).utf8String == "health.heap" =>
-        val Heap(timestamp, used, max) = ser.deserialize(m.frames(1).toArray, classOf[Heap]).get
-
-        if ((used.toDouble / max) > 0.9) count += 1
-        else count = 0
-
-        if (count > 10) log.warning("Need more memory, using {} %", (100.0 * used / max))
-    }
-  }
-  //#alerter
-
-
-
 
 
   val socket = "tcp://127.0.0.1:30987"
@@ -135,7 +95,6 @@ object ZeromqDocSpec {
 
     def receive: Receive = {
       case Tick =>
-        log.info("At least I'm starting!")
 
         //ask each client to repeat after him
         val timestamp = System.currentTimeMillis
@@ -178,6 +137,7 @@ object ZeromqDocSpec {
 
   class CommandNode1 extends CommandNode { def name = "cmd_1" }
 
+  class CommandNode2 extends CommandNode { def name = "cmd_2" }
 }
 
 @RunWith(classOf[JUnitRunner])
@@ -186,115 +146,14 @@ class ZeromqDocSpec extends AkkaSpec("akka.loglevel=INFO, akka.log-dead-letters-
 
 
   "demonstrate one server and two clients" in {
-    checkZeroMQInstallation()
 
     system.actorOf(Props[CommandNode1], name = "node1")
+    system.actorOf(Props[CommandNode2], name = "node2")
 
     system.actorOf(Props[CommandIssuer], name = "querier")
+
     // Let it run for a while to see some output.
     // Don't do like this in real tests, this is only doc demonstration.
-    Thread.sleep(10.seconds.toMillis)
-  }
-
-//  "demonstrate how to create socket" in {
-//    checkZeroMQInstallation()
-//
-//    //#pub-socket
-//    import akka.zeromq.ZeroMQExtension
-//
-//    val pubSocket = ZeroMQExtension(system).newSocket(SocketType.Pub, Bind("tcp://127.0.0.1:21231"))
-//    //#pub-socket
-//
-//    import akka.zeromq._
-//    val sub: { def subSocket: ActorRef; def listener: ActorRef } = new AnyRef {
-//      //#sub-socket
-//      import akka.zeromq._
-//
-//      class Listener extends Actor {
-//        def receive: Receive = {
-//          case Connecting ⇒ //...
-//          case m: ZMQMessage ⇒ //...
-//          case _ ⇒ //...
-//        }
-//      }
-//
-//      val listener = system.actorOf(Props(classOf[Listener], this))
-//      val subSocket = ZeroMQExtension(system).newSocket(
-//          SocketType.Sub
-//        , Listener(listener)
-//        , Connect("tcp://127.0.0.1:21231")
-//        , SubscribeAll
-//      )
-//      //#sub-socket
-//    }
-//    val listener = sub.listener
-//
-//    //#sub-topic-socket
-//    val subTopicSocket = ZeroMQExtension(system).newSocket(
-//        SocketType.Sub
-//      , Listener(listener)
-//      , Connect("tcp://127.0.0.1:21231")
-//      , Subscribe("foo.bar")
-//    )
-//    //#sub-topic-socket
-//
-//    //#unsub-topic-socket
-//    subTopicSocket ! Unsubscribe("foo.bar")
-//    //#unsub-topic-socket
-//
-//    val payload = Array.empty[Byte]
-//    //#pub-topic
-//    pubSocket ! ZMQMessage(ByteString("foo.bar"), ByteString(payload))
-//    //#pub-topic
-//
-//    system.stop(sub.subSocket)
-//    system.stop(subTopicSocket)
-//
-//    //#high-watermark
-//    val highWatermarkSocket = ZeroMQExtension(system).newSocket(
-//      SocketType.Router,
-//      Listener(listener),
-//      Bind("tcp://127.0.0.1:21233"),
-//      HighWatermark(50000))
-//    //#high-watermark
-//  }
-
-//  "demonstrate pub-sub" in {
-//    checkZeroMQInstallation()
-//
-//    //#health
-//
-//    system.actorOf(Props[HealthProbe], name = "health")
-//    //#health
-//
-//    //#logger
-//
-//    system.actorOf(Props[Logger], name = "logger")
-//    //#logger
-//
-//    //#alerter
-//
-//    system.actorOf(Props[HeapAlerter], name = "alerter")
-//    //#alerter
-//
-//    // Let it run for a while to see some output.
-//    // Don't do like this in real tests, this is only doc demonstration.
-//    Thread.sleep(10.seconds.toMillis)
-//
-//  }
-
-  def checkZeroMQInstallation() = try {
-    ZeroMQExtension(system).version match {
-      case ZeroMQVersion(2, x, _) if x >= 1 ⇒ Unit
-      case ZeroMQVersion(y, _, _) if y >= 3 ⇒ Unit
-      case version ⇒
-        println("linkage error: bad version: " + version)
-        pending
-    }
-  } catch {
-    case e: LinkageError ⇒
-      println("linkage error, exception: " + e.getMessage())
-      e.printStackTrace()
-      pending
+    Thread.sleep(2.seconds.toMillis)
   }
 }
