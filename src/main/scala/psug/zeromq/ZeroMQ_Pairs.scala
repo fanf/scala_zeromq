@@ -1,21 +1,17 @@
 package psug.zeromq
 
 import java.net.ServerSocket
-import scala.concurrent.Future
+
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
-import scala.util.{ Success, Failure, Try }
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
-import akka.actor.{ Actor, ActorLogging, ActorRef, ActorSystem, Props, actorRef2Scala }
+import scala.util.{ Failure, Success, Try }
+
+import akka.actor._
 import akka.pattern.{ ask, pipe }
 import akka.serialization.SerializationExtension
-import akka.testkit.AkkaSpec
 import akka.util.{ ByteString, Timeout }
 import akka.zeromq._
-import akka.actor.PoisonPill
-import com.typesafe.config.ConfigFactory
 
 /**
  * Goal of the exercice:

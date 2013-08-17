@@ -1,16 +1,11 @@
 package psug.zeromq
 
 import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
-import org.junit.runner.RunWith
-import akka.actor.{ Actor, ActorLogging, Props, actorRef2Scala }
+
+import akka.actor.{ Actor, ActorLogging, ActorSystem, PoisonPill, Props, actorRef2Scala }
 import akka.serialization.SerializationExtension
-import akka.testkit.AkkaSpec
 import akka.util.ByteString
-import akka.zeromq.{ Bind, Connect, Identity, Listener, SocketType, ZMQMessage, ZeroMQExtension }
-import org.scalatest.junit.JUnitRunner
-import akka.actor.ActorSystem
-import akka.actor.PoisonPill
+import akka.zeromq.{ Bind, Connect, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 
 /**
  * Goal of the exercice:
@@ -62,11 +57,15 @@ object SimpleReqRepActors {
   import akka.actor.ActorLogging
   import akka.serialization.SerializationExtension
   import java.lang.management.ManagementFactory
+  import akka.pattern.ask
+  import scala.concurrent.ExecutionContext.Implicits.global
 
   case object Tick
 
   case class RepeatAfterMe(say: String)
   case class Answer(s:String)
+
+  case object Plop
 
   //a zmq server
   class Responder(socket:String) extends Actor with ActorLogging {
@@ -105,7 +104,6 @@ object SimpleReqRepActors {
       self ! Tick
     }
 
-
     def receive: Receive = {
       case Tick =>
 
@@ -121,6 +119,7 @@ object SimpleReqRepActors {
 
         //start a new request / response
         self ! Tick
+
     }
   }
 }
@@ -142,6 +141,14 @@ object SimpleReqRep extends App {
   // Don't do like this in real tests, this is only doc demonstration.
   Thread.sleep(2.seconds.toMillis)
 
+  println("Stopping client 1")
+
+  //stop the client
+  client ! PoisonPill
+
+  Thread.sleep(2.seconds.toMillis)
+
+  println("Stopping everything")
   //shutdown everything
   system.shutdown
 }
