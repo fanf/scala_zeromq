@@ -1,30 +1,21 @@
-package psug.aout
+package psug.zeromq
 
+import java.net.ServerSocket
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
+import scala.util.{ Success, Failure, Try }
 import org.junit.runner.RunWith
-import akka.actor.{ Actor, ActorLogging, Props, actorRef2Scala }
+import org.scalatest.junit.JUnitRunner
+import akka.actor.{ Actor, ActorLogging, ActorRef, ActorSystem, Props, actorRef2Scala }
+import akka.pattern.{ ask, pipe }
 import akka.serialization.SerializationExtension
 import akka.testkit.AkkaSpec
-import akka.util.ByteString
-import akka.zeromq.{ Bind, Connect, Identity, Listener, SocketType, ZMQMessage, ZeroMQExtension }
-import org.scalatest.junit.JUnitRunner
-import akka.actor.ActorRef
-import akka.actor.ActorSystem
-import scala.util.Failure
-import scala.util.Success
-import scala.concurrent.Future
-import scala.util.Try
+import akka.util.{ ByteString, Timeout }
 import akka.zeromq._
-import akka.actor.Actor
-import akka.actor.Props
-import akka.actor.ActorLogging
-import akka.serialization.SerializationExtension
-import java.lang.management.ManagementFactory
-import akka.util.Timeout
-import akka.pattern.ask
-import akka.pattern.pipe
-import akka.pattern.gracefulStop
+import akka.actor.PoisonPill
+import com.typesafe.config.ConfigFactory
 
 /**
  * Goal of the exercice:
@@ -85,19 +76,18 @@ object ZeromqPairsSpec {
   case class ExecCommand(command: String)
   case class CommandResult(result: String)
 
-  val registrationSocket = "tcp://127.0.0.1:30987"
 
-  implicit val timeout = Timeout(5 second)
+  implicit val timeout = Timeout(2 second)
 
-  import scala.concurrent.ExecutionContext.Implicits.global
 
   //socket should looks like: tcp://127.0.0.1:30987
-  final case class RegisterNode(socket: String)
+  final case class RegisterNode(name: String, socket: String)
 
   val registrationQueryKey = "register"
   val registrationOkKey = "registration OK"
   val execCmdKey = "execCmd"
   val cmdResultKey = "cmdResul"
+
 
   //val newSocket = new ServerSocket(0)
   //println("listening on port: " + s.getLocalPort)
@@ -105,18 +95,20 @@ object ZeromqPairsSpec {
 
   //The main actor: wait for user command, send them to a command manager,
   //send back response to the user
-  class UserIO(system: ActorSystem) extends Actor with ActorLogging {
+  class Admin(registrationSocket: String) extends Actor with ActorLogging {
     import scala.concurrent.Await
     import akka.pattern.ask
     import scala.concurrent.duration._
 
     //command issuer
+    val askNodes = context.actorOf( Props[AskNodes], name = "askNodes" )
 
-    val askToNodes = system.actorOf(Props[AskToNodes])
+    //registration service
+    val registrationService = context.actorOf(Props(new RegistrationService(registrationSocket, askNodes)), name = "registrationService")
 
     def receive = {
       case cmd:ExecCommand =>
-        (askToNodes ? cmd) pipeTo sender
+        (askNodes ? cmd) pipeTo sender
 
     }
 
@@ -133,23 +125,31 @@ object ZeromqPairsSpec {
    * Then, we have a master actor which interface with the user.
    */
 
-  class registrationService(commandSender: ActorRef) extends Actor with ActorLogging {
+  class RegistrationService(registrationSocket: String, commandSender: ActorRef) extends Actor with ActorLogging {
 
     val repSocket = ZeroMQExtension(context.system).newSocket(SocketType.Rep, Listener(self),  Bind(registrationSocket), Identity("registrationService".getBytes))
     val ser = SerializationExtension(context.system)
+
+    log.info("Registration service up at socket " + registrationSocket)
 
     //only answer to "connect to" command by spawning new actors
     def receive = {
       // the first frame is the topic, second is the message
       case m: ZMQMessage if m.frames(0).utf8String == registrationQueryKey =>
-        val RegisterNode(socket) = ser.deserialize(m.frames(1).toArray, classOf[RegisterNode]).get
+        val RegisterNode(name, socket) = ser.deserialize(m.frames(1).toArray, classOf[RegisterNode]).get
+        log.info(s"Registering new node ${name} with socket ${socket}")
 
         //send a message to create the actor for connection to node
-        commandSender ! RegisterNode(socket)
+        commandSender ! RegisterNode(name, socket)
 
         //answer that connection is OK so that the node can close its registration socket.
         repSocket ! ZMQMessage(ByteString(registrationOkKey))
 
+      case Connecting =>
+        log.error("New connection establish for registration by " + sender.path)
+
+      case Closed =>
+        log.error("Connection lost/closed")
     }
   }
 
@@ -158,7 +158,7 @@ object ZeromqPairsSpec {
    * to send command to (register / unregister nodes)
    * and to send command and collect response to/from them.
    */
-  class AskToNodes(system: ActorSystem) extends Actor {
+  class AskNodes() extends Actor {
 
     //node will be identified by their socket (hostname, port)
     val nodes = collection.mutable.Map[String, ActorRef]()
@@ -172,8 +172,8 @@ object ZeromqPairsSpec {
         sender ! responses
 
       //register a new node
-      case RegisterNode(socket) =>
-        nodes += (socket -> system.actorOf(Props(new AskToNode(socket))))
+      case RegisterNode(name, socket) =>
+        nodes += (socket -> context.actorOf(Props(new AskToNode(socket)), name = name))
 
       //TODO: handle unregistration & lost connection
     }
@@ -209,14 +209,39 @@ object ZeromqPairsSpec {
         //send back the response to who asked
         response pipeTo sender
 
-      //TODO: case lost connection => unregister node
+      case Connecting =>
+        log.error("New connection establish for registration by " + sender.path)
+
+      case Closed =>
+        log.error("Connection lost/closed")
+
     }
   }
 
 
 
+  //////////////////////////////////////////////
+  //////////////////// node ////////////////////
+  //////////////////////////////////////////////
 
-  ///// node part /////
+
+  class Node(registrationServiceSocket: String, nodeSocket:String) extends Actor with ActorLogging {
+
+    //start to listen for command
+    val answer = context.actorOf(Props(new NodeAnswer(nodeSocket)), name = "answer")
+
+    // a dismissable actor for registration
+    val register = context.actorOf(Props(new NodeRegistration(registrationServiceSocket, nodeSocket)), "registerer")
+
+    def receive: Receive = {
+
+      case PoisonPill =>
+        context.stop(register)
+        context.stop(answer)
+        context.stop(self)
+    }
+
+  }
 
 
   /**
@@ -224,11 +249,13 @@ object ZeromqPairsSpec {
    * registering that node in the service
    */
   class NodeRegistration(registrationServiceSocket: String, nodeSocket:String) extends Actor with ActorLogging {
-    val reqSocket = ZeroMQExtension(context.system).newSocket(SocketType.Req, Listener(self),  Bind(registrationServiceSocket), Identity(nodeSocket.getBytes))
+    val reqSocket = ZeroMQExtension(context.system).newSocket(SocketType.Req, Listener(self), Connect(registrationServiceSocket), Identity(nodeSocket.getBytes))
     val ser = SerializationExtension(context.system)
 
     override def preStart {
-      val registrationPayload = ser.serialize(RegisterNode(nodeSocket)).get
+      val nodeName = self.path.parent.name
+      val registrationPayload = ser.serialize(RegisterNode(nodeName, nodeSocket)).get
+      log.info(s"registering node ${nodeName} with socket ${nodeSocket} on registration service ${registrationServiceSocket}")
       reqSocket ! ZMQMessage(ByteString(registrationQueryKey), ByteString( registrationPayload ))
     }
 
@@ -240,7 +267,14 @@ object ZeromqPairsSpec {
       // the first frame is the topic, second is the message
       case m: ZMQMessage if( m.frames(0).utf8String == registrationOkKey) =>
         log.info("registration OK, shutdown")
-        gracefulStop(self, 5 second)
+        context.stop(reqSocket)
+        context.stop(self)
+
+      case Connecting =>
+        log.error("New connection establish for registration by " + sender.path)
+
+      case Closed =>
+        log.error("Connection lost/closed")
     }
   }
 
@@ -259,26 +293,70 @@ object ZeromqPairsSpec {
         val repPayload = ser.serialize(Answer( s"result for command ${cmd} on ${socket}: TODO")).get
         repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
 
+
+      case Connecting =>
+        log.debug("New connection establish for asking to exec command by " + sender.path)
+
+      case Closed =>
+        log.error("Connection lost/closed")
     }
   }
 
 }
 
-@RunWith(classOf[JUnitRunner])
-class ZeromqPairsSpec extends AkkaSpec("akka.loglevel=INFO, akka.log-dead-letters-during-shutdown=false") {
+object ZeromqPairs extends App {
+
+
   import ZeromqPairsSpec._
 
+  def nextSocket() = new ServerSocket(0).getLocalPort
 
-  "demonstrate one server and two clients" in {
+  val registrationSocket = "tcp://127.0.0.1:30987"
+  val node1Socket = s"tcp://127.0.0.1:${nextSocket}"
+  val node2Socket = s"tcp://127.0.0.1:${nextSocket}"
 
-    //set up two client
-    //TODO
+  implicit val system = ActorSystem("zeromq")
 
 
-    system.actorOf(Props[UserIO], name = "querier")
 
-    // Let it run for a while to see some output.
-    // Don't do like this in real tests, this is only doc demonstration.
-    Thread.sleep(2.seconds.toMillis)
+  val admin = system.actorOf(Props(new Admin(registrationSocket)), name = "admin")
+
+  def exec(cmd:String) : Unit = (admin ? ExecCommand(cmd)).onComplete {
+    case Success(results:List[_]) =>
+      results.foreach { case (id, res) => res match {
+        case future:Future[Try[CommandResult]] => future.onComplete {
+          case Success(Success(CommandResult(res))) =>  println("command result: " + res)
+          case Success(x) => println("unexpected: " + x)
+          case Failure(x) => println("fails: " + x)
+        }
+        case x => println("unexpected unexpected: " + x)
+      } }
+    case Failure(x) => println("fails: " + x)
   }
+
+
+
+  //first node
+  val node1 = system.actorOf(Props(new Node(registrationSocket, node1Socket)), name = "node1")
+
+  Thread.sleep(2.seconds.toMillis)
+
+  //issue a command
+
+  exec("ls cmd")
+
+  //start an other node
+
+//    val node2 = system.actorOf(Props(new Node(registrationSocket, node2Socket)), name = "node2")
+//
+//    Thread.sleep(1.seconds.toMillis)
+//
+//    //issue an other command
+//    exec("rm -rf /")
+
+
+  // Let it run for a while to see some output.
+  // Don't do like this in real tests, this is only doc demonstration.
+  Thread.sleep(5.seconds.toMillis)
+  system.shutdown
 }

@@ -1,4 +1,4 @@
-package psug.aout
+package psug.zeromq
 
 import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
@@ -9,6 +9,8 @@ import akka.testkit.AkkaSpec
 import akka.util.ByteString
 import akka.zeromq.{ Bind, Connect, Identity, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 import org.scalatest.junit.JUnitRunner
+import akka.actor.ActorSystem
+import akka.actor.PoisonPill
 
 /**
  * Goal of the exercice:
@@ -53,12 +55,7 @@ import org.scalatest.junit.JUnitRunner
  *
  *
  */
-object ZeromqDocSpec {
-
-
-
-
-
+object SimpleReqRepActors {
   import akka.zeromq._
   import akka.actor.Actor
   import akka.actor.Props
@@ -71,36 +68,49 @@ object ZeromqDocSpec {
   case class RepeatAfterMe(say: String)
   case class Answer(s:String)
 
+  //a zmq server
+  class Responder(socket:String) extends Actor with ActorLogging {
 
-  val socket = "tcp://127.0.0.1:30987"
+    val repSocket = ZeroMQExtension(context.system).newSocket(
+        SocketType.Rep
+      , Listener(self) // Responder will get message from ZeroMQ socket
+      , Bind(socket)   // a service binds a socket and wait for connection
+    )
+    val ser = SerializationExtension(context.system)
 
-  //the command issuer is a zmq client
-  class CommandIssuer extends Actor with ActorLogging {
+    def receive = {
+      // the first frame is the topic, second is the message
+      case m: ZMQMessage if m.frames(0).utf8String == "repeat" =>
+        val RepeatAfterMe(repeat) = ser.deserialize(m.frames(1).toArray, classOf[RepeatAfterMe]).get
+
+        val repPayload = ser.serialize(Answer( s"I repeat ${repeat}")).get
+        repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
+    }
+  }
+
+  //socket that issue requests
+  class Requester(socket:String) extends Actor with ActorLogging {
 
     //self, i.e CommandIssuer, listen to message gotten by repSocket
     //needed to get back answer from service
-    val reqSocket = ZeroMQExtension(context.system).newSocket(SocketType.Req, Listener(self), Connect(socket), Identity("cmdIssuer".getBytes))
+    val reqSocket = ZeroMQExtension(context.system).newSocket(
+        SocketType.Req
+      , Listener(self)
+      , Connect(socket)
+    )
     val ser = SerializationExtension(context.system)
 
-    import context.dispatcher
 
     override def preStart() {
       self ! Tick
-//      context.system.scheduler.schedule(1 second, 1 second, self, Tick)
     }
 
-    override def postRestart(reason: Throwable) {
-      // don't call preStart, only schedule once
-    }
 
     def receive: Receive = {
       case Tick =>
 
-        //ask each client to repeat after him
-        val timestamp = System.currentTimeMillis
-
         // use akka SerializationExtension to convert to bytes
-        val repeatPayload = ser.serialize(RepeatAfterMe("now, it's " + timestamp.toString)).get
+        val repeatPayload = ser.serialize(RepeatAfterMe("Say hello!")).get
 
         // the first frame is the topic, second is the message
         reqSocket ! ZMQMessage(ByteString("repeat"), ByteString(repeatPayload))
@@ -109,51 +119,29 @@ object ZeromqDocSpec {
         val Answer(x) = ser.deserialize(m.frames(1).toArray, classOf[Answer]).get
         log.info("Got answer: " + x)
 
+        //start a new request / response
         self ! Tick
-
     }
   }
-
-  //node are zmq server
-  trait CommandNode extends Actor with ActorLogging {
-    def name: String
-
-    val repSocket = ZeroMQExtension(context.system).newSocket(SocketType.Rep, Listener(self),  Bind(socket), Identity(name.getBytes))
-    val ser = SerializationExtension(context.system)
-
-    log.info("At least I'm starting!")
-
-    def receive = {
-      // the first frame is the topic, second is the message
-      case m: ZMQMessage if m.frames(0).utf8String == "repeat" =>
-        val RepeatAfterMe(timestamp) = ser.deserialize(m.frames(1).toArray, classOf[RepeatAfterMe]).get
-
-        log.info("Got zmq message, must repeat: " + timestamp)
-        val repPayload = ser.serialize(Answer( s"I'm ${name} and I repeat ${timestamp}")).get
-        repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
-
-    }
-  }
-
-  class CommandNode1 extends CommandNode { def name = "cmd_1" }
-
-  class CommandNode2 extends CommandNode { def name = "cmd_2" }
 }
 
-@RunWith(classOf[JUnitRunner])
-class ZeromqDocSpec extends AkkaSpec("akka.loglevel=INFO, akka.log-dead-letters-during-shutdown=false") {
-  import ZeromqDocSpec._
+object SimpleReqRep extends App {
+  import SimpleReqRepActors._
+
+  implicit val system = ActorSystem("zeromq")
+  val socket = "tcp://127.0.0.1:30987"
+
+  val client = system.actorOf(Props( new Requester(socket)), name = "client")
+  Thread.sleep(2.seconds.toMillis)
+
+  system.actorOf(Props( new Responder(socket)), name = "server")
 
 
-  "demonstrate one server and two clients" in {
 
-    system.actorOf(Props[CommandNode1], name = "node1")
-    system.actorOf(Props[CommandNode2], name = "node2")
+  // Let it run for a while to see some output.
+  // Don't do like this in real tests, this is only doc demonstration.
+  Thread.sleep(2.seconds.toMillis)
 
-    system.actorOf(Props[CommandIssuer], name = "querier")
-
-    // Let it run for a while to see some output.
-    // Don't do like this in real tests, this is only doc demonstration.
-    Thread.sleep(2.seconds.toMillis)
-  }
+  //shutdown everything
+  system.shutdown
 }
