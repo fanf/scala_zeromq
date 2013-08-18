@@ -1,14 +1,10 @@
 package psug.zeromq
-
-import java.net.ServerSocket
+package reqrep
 
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.ExecutionContext.Implicits.global
 
-import akka.actor.{ Actor, ActorLogging, ActorSystem, PoisonPill, Props, actorRef2Scala }
-import akka.serialization.SerializationExtension
-import akka.util.ByteString
-import akka.zeromq._
+import akka.actor.{ Actor, ActorLogging, ActorSystem, Props, actorRef2Scala }
+import akka.zeromq.{ Bind, Closed, Connect, Connecting, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 
 /**
  * Goal of the exercice:
@@ -20,7 +16,7 @@ import akka.zeromq._
  * can connect to a server.
  *
  */
-object SimplestReqRep extends App {
+object SimplestPubSub extends App {
   //Test actor that prints all ZEROMQ message it gets
 
   class Listener extends Actor with ActorLogging {
@@ -37,8 +33,7 @@ object SimplestReqRep extends App {
   val listener = system.actorOf(Props[Listener], "listener")
 
   val server = ZeroMQExtension(system).newSocket(
-      SocketType.Rep
-    , Listener(listener) // listener will get message from ZeroMQ socket
+      SocketType.Pub
     , Bind(socket)   // a service binds a socket and wait for connection
   )
 

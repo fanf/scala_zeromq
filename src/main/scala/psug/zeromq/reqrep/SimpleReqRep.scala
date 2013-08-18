@@ -1,14 +1,11 @@
 package psug.zeromq
+package reqrep
 
-import java.net.ServerSocket
-
-import scala.concurrent.duration.DurationInt
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration.DurationInt
 
 import akka.actor.{ Actor, ActorLogging, ActorSystem, PoisonPill, Props, actorRef2Scala }
-import akka.serialization.SerializationExtension
-import akka.util.ByteString
-import akka.zeromq._
+import akka.zeromq.{ Bind, Connect, Connecting, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 
 /**
  * Goal of the exercice:

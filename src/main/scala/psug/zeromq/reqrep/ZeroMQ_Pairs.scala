@@ -1,4 +1,5 @@
 package psug.zeromq
+package reqrep
 
 import java.net.ServerSocket
 
@@ -12,7 +13,7 @@ import akka.pattern.{ ask, pipe }
 import akka.serialization.SerializationExtension
 import akka.util.ByteString
 import akka.util.Timeout.durationToTimeout
-import akka.zeromq._
+import akka.zeromq.{ Bind, Closed, Connect, Connecting, Identity, Listener, SocketType, ZMQMessage, ZeroMQExtension }
 
 /**
  * Goal of the exercice:

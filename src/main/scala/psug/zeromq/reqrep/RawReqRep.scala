@@ -1,8 +1,10 @@
 package psug.zeromq
+package reqrep
+
 
 import org.zeromq.ZMQ
 
-object RawZmqServer extends App {
+object RawReqRepServer extends App {
 
   val context = ZMQ.context(1)
 
@@ -21,7 +23,7 @@ object RawZmqServer extends App {
 
 }
 
-trait RawZmqClient {
+trait RawReqRepClient {
   def name : String
   val context = ZMQ.context(1)
   val client = context.socket(ZMQ.REQ)
@@ -36,5 +38,5 @@ trait RawZmqClient {
   }
 }
 
-object client1 extends App with RawZmqClient { override def name = "client_1" }
-object client2 extends App with RawZmqClient { override def name = "client_2" }
+object client1 extends App with RawReqRepClient { override def name = "client_1" }
+object client2 extends App with RawReqRepClient { override def name = "client_2" }

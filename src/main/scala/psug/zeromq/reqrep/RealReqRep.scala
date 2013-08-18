@@ -1,4 +1,5 @@
 package psug.zeromq
+package reqrep
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.DurationInt

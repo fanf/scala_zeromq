@@ -8,7 +8,7 @@ import akka.actor.ActorSystem
 package object zeromq {
 
 
-  def zmqMsg(s: String) : ZMQMessage = ZMQMessage(ByteString(s))
+  def zmqMsg(s: String*) : ZMQMessage = ZMQMessage(s.toSeq.map(ByteString(_)):_*)
 
   def forceShutdown(implicit system: ActorSystem) : Unit = {
     println("Stopping everything")
