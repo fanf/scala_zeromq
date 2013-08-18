@@ -1,31 +1,38 @@
 package psug.zeromq
 
-import java.net.ServerSocket
-
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.ExecutionContext.Implicits.global
-
 import akka.actor.{ Actor, ActorLogging, ActorSystem, PoisonPill, Props, actorRef2Scala }
 import akka.serialization.SerializationExtension
 import akka.util.ByteString
-import akka.zeromq._
+import akka.zeromq.{ Bind, Connect, Listener, SocketType, ZMQMessage, ZeroMQExtension }
+import java.util.zip.ZStreamRef
+import akka.actor.ActorRef
+import akka.pattern.ask
+import scala.util.Failure
+import scala.util.Success
 
 /**
  * Goal of the exercice:
  *
- * Demonstrate how simple Request / Response works
- * in ZeroMQ / AKKA.
- *
- * In particular, we are going to see how multiple client
- * can connect to a server.
+ *  Add to simple rep/req the "ask" semantics
  *
  */
-object SimpleReqRepActors {
+object RealReqRepActors {
+  import akka.zeromq._
+  import akka.actor.Actor
+  import akka.actor.Props
+  import akka.actor.ActorLogging
+  import akka.serialization.SerializationExtension
+  import java.lang.management.ManagementFactory
+  import akka.pattern.ask
+  import scala.concurrent.ExecutionContext.Implicits.global
 
   case object Tick
 
   case class RepeatAfterMe(say: String)
   case class Answer(s:String)
+
+  case object Plop
 
   //a zmq server
   class Responder(socket:String) extends Actor with ActorLogging {
@@ -42,6 +49,7 @@ object SimpleReqRepActors {
       case m: ZMQMessage if m.frames(0).utf8String == "repeat" =>
         val RepeatAfterMe(repeat) = ser.deserialize(m.frames(1).toArray, classOf[RepeatAfterMe]).get
 
+        log.info("Server was asked to repeat: " + repeat)
         val repPayload = ser.serialize(Answer( s"I repeat ${repeat}")).get
         repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
     }
@@ -59,57 +67,57 @@ object SimpleReqRepActors {
     )
     val ser = SerializationExtension(context.system)
 
-
-    override def preStart() {
-      self ! Tick
-    }
+    var responseCollector: ActorRef = null
 
     def receive: Receive = {
       case Tick =>
 
+        responseCollector = sender
         // use akka SerializationExtension to convert to bytes
-        val repeatPayload = ser.serialize(RepeatAfterMe("Say hello from " + self.path.name)).get
+        val repeatPayload = ser.serialize(RepeatAfterMe("Say hello!")).get
 
         // the first frame is the topic, second is the message
         reqSocket ! ZMQMessage(ByteString("repeat"), ByteString(repeatPayload))
 
       case m: ZMQMessage if m.frames(0).utf8String == "answer" =>
         val Answer(x) = ser.deserialize(m.frames(1).toArray, classOf[Answer]).get
-        log.info("Got answer: " + x)
-
-        context.system.scheduler.scheduleOnce(1 seconds, self, Tick)
+        log.info("client got response, forwarding to collector")
+        responseCollector ! Answer(x)
+        responseCollector = null
     }
   }
+
+  class MessageCollector(socket: String) extends Actor with ActorLogging {
+
+    val client = context.actorOf(Props(new Requester(socket)), name = "client")
+
+    def receive: Receive = {
+      case Tick =>
+        ask(client, Tick)(5 second).onComplete {
+          case Failure(x) => log.error(x.getMessage)
+          case Success(x) => log.info("Collector got message: " + x)
+        }
+    }
+  }
+
 }
 
-object SimpleReqRep extends App {
-  import SimpleReqRepActors._
+object RealReqRep extends App {
+  import RealReqRepActors._
 
   implicit val system = ActorSystem("zeromq")
-  val socket = "tcp://127.0.0.1:" + nextPort
-  println("socket: " + socket)
+  val socket = "tcp://127.0.0.1:30987"
 
-  val client = system.actorOf(Props( new Requester(socket)), name = "client_1")
+  val messageCollector = system.actorOf(Props( new MessageCollector(socket)), name = "client")
+
+  messageCollector ! Tick
+
   Thread.sleep(2.seconds.toMillis)
 
   system.actorOf(Props( new Responder(socket)), name = "server")
 
+
   Thread.sleep(2.seconds.toMillis)
-
-  system.actorOf(Props( new Requester(socket)), name = "client_2")
-
-
-  // Let it run for a while to see some output.
-  // Don't do like this in real tests, this is only doc demonstration.
-  Thread.sleep(2.seconds.toMillis)
-
-  println("Stopping client 1")
-
-  //stop the client
-  client ! PoisonPill
-
-  Thread.sleep(1.seconds.toMillis)
-
   println("Stopping everything")
   //shutdown everything
   system.shutdown

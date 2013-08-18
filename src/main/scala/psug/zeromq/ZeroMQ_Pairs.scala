@@ -60,20 +60,9 @@ object ZeromqPairsSpec {
 
 
 
-  //why, oh why Try is such a bad datatype for errors ?
-  case object BadNodeProtocolAnswer extends Exception()
-
-  case object Tick
-
-  case class RepeatAfterMe(say: String)
-  case class Answer(s:String)
-
-
   case class ExecCommand(command: String)
   case class CommandResult(result: String)
-
-
-  implicit val timeout = Timeout(2 second)
+  case object CommunicationError
 
 
   //socket should looks like: tcp://127.0.0.1:30987
@@ -104,7 +93,7 @@ object ZeromqPairsSpec {
 
     def receive = {
       case cmd:ExecCommand =>
-        (askNodes ? cmd) pipeTo sender
+        (askNodes ? cmd)(5 seconds) pipeTo sender
 
     }
 
@@ -164,7 +153,7 @@ object ZeromqPairsSpec {
       //forward a command to each nodes
       //and collect responses in futures, tracking who answered
       case cmd:ExecCommand =>
-        val responses = nodes.toList.map { case (id, actor) => (id, actor ? cmd)}
+        val responses = nodes.toList.map { case (id, actor) => (id, (actor ? cmd)(5 seconds))}
         sender ! responses
 
       //register a new node
@@ -182,28 +171,45 @@ object ZeromqPairsSpec {
   class AskToNode(socket: String) extends Actor with ActorLogging {
     //self, i.e CommandIssuer, listen to message gotten by repSocket
     //needed to get back answer from service
-    val reqSocket = ZeroMQExtension(context.system).newSocket(SocketType.Req, Listener(self), Connect(socket), Identity(socket.getBytes))
+    val reqSocket = ZeroMQExtension(context.system).newSocket(
+        SocketType.Req
+      , Listener(self)
+      , Connect(socket)
+    )
     val ser = SerializationExtension(context.system)
+
+    //Better way to do that ?
+    var responseCollector: ActorRef = null
 
     def receive: Receive = {
       //user ask for a new command
       case ExecCommand(cmd) =>
+
+        responseCollector = sender
+
         //ask the node to execute the command
         val cmdPayload = ser.serialize(ExecCommand(cmd)).get
 
         // the first frame is the topic, second is the message
         //we are in ZeroMQ req/rep mode, so we need to get the answer before
         //processing an other message
-        val response :  Future[Try[CommandResult]] =
-          (reqSocket ? ZMQMessage(ByteString(execCmdKey), ByteString(cmdPayload))).map {
-            case m: ZMQMessage if( m.frames(0).utf8String == cmdResultKey ) =>
-              ser.deserialize(m.frames(1).toArray, classOf[CommandResult])
+        log.info("New command to execute sent to socket " + socket)
+        reqSocket ! ZMQMessage(ByteString(execCmdKey), ByteString(cmdPayload))
 
-            case x                                                       =>
-              Failure(BadNodeProtocolAnswer)
-          }
-        //send back the response to who asked
-        response pipeTo sender
+      //node response
+      case m: ZMQMessage if( m.frames(0).utf8String == cmdResultKey ) =>
+
+        val response = ser.deserialize(m.frames(1).toArray, classOf[CommandResult]) match {
+          case Success(cmdResult:CommandResult) => cmdResult
+          case Success(x) =>
+            log.debug("Get unexpected answer from node: " + x)
+            CommunicationError
+          case Failure(x) =>
+            log.debug("Deserialisation error: " + x)
+            CommunicationError
+        }
+        responseCollector ! response
+        responseCollector = null
 
       case Connecting =>
         log.error("New connection establish for registration by " + sender.path)
@@ -255,10 +261,6 @@ object ZeromqPairsSpec {
       reqSocket ! ZMQMessage(ByteString(registrationQueryKey), ByteString( registrationPayload ))
     }
 
-    override def postRestart(reason: Throwable) {
-      // don't call preStart, only schedule once
-    }
-
     def receive = {
       // the first frame is the topic, second is the message
       case m: ZMQMessage if( m.frames(0).utf8String == registrationOkKey) =>
@@ -277,18 +279,23 @@ object ZeromqPairsSpec {
   //node are zmq server that execute queries
   class NodeAnswer(socket:String) extends Actor with ActorLogging {
 
-    val repSocket = ZeroMQExtension(context.system).newSocket(SocketType.Rep, Listener(self),  Bind(socket), Identity(socket.getBytes))
+    val repSocket = ZeroMQExtension(context.system).newSocket(
+        SocketType.Rep
+      , Listener(self)
+      , Bind(socket)
+    )
     val ser = SerializationExtension(context.system)
+
+    override def preStart() = log.info("Waiting for command on socket: " + socket)
 
     def receive = {
       // the first frame is the topic, second is the message
       case m: ZMQMessage if( m.frames(0).utf8String == execCmdKey) =>
+        log.info("Got zmq message, must execute command")
         val ExecCommand(cmd) = ser.deserialize(m.frames(1).toArray, classOf[ExecCommand]).get
 
-        log.info("Got zmq message, must execute command: " + cmd)
-        val repPayload = ser.serialize(Answer( s"result for command ${cmd} on ${socket}: TODO")).get
-        repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
-
+        val repPayload = ser.serialize(CommandResult( s"result for command ${cmd} on ${socket}: TODO")).get
+        repSocket ! ZMQMessage(ByteString(cmdResultKey), ByteString( repPayload ))
 
       case Connecting =>
         log.debug("New connection establish for asking to exec command by " + sender.path)
@@ -305,11 +312,17 @@ object ZeromqPairs extends App {
 
   import ZeromqPairsSpec._
 
-  def nextSocket() = new ServerSocket(0).getLocalPort
+  //really java, just to find a free port ?
+  def nextPort() = {
+    val s = new ServerSocket(0)
+    val port = s.getLocalPort
+    s.close()
+    port
+  }
 
-  val registrationSocket = "tcp://127.0.0.1:30987"
-  val node1Socket = s"tcp://127.0.0.1:${nextSocket}"
-  val node2Socket = s"tcp://127.0.0.1:${nextSocket}"
+  val registrationSocket = s"tcp://127.0.0.1:${nextPort}"
+  val node1Socket = s"tcp://127.0.0.1:${nextPort}"
+  val node2Socket = s"tcp://127.0.0.1:${nextPort}"
 
   implicit val system = ActorSystem("zeromq")
 
@@ -317,16 +330,17 @@ object ZeromqPairs extends App {
 
   val admin = system.actorOf(Props(new Admin(registrationSocket)), name = "admin")
 
-  def exec(cmd:String) : Unit = (admin ? ExecCommand(cmd)).onComplete {
+  def exec(cmd:String) : Unit = (admin ? ExecCommand(cmd))(5 seconds).onComplete {
     case Success(results:List[_]) =>
       results.foreach { case (id, res) => res match {
-        case future:Future[Try[CommandResult]] => future.onComplete {
-          case Success(Success(CommandResult(res))) =>  println("command result: " + res)
+        case future:Future[_] => future.onComplete {
+          case Success(CommandResult(res)) =>  println("command result: " + res)
           case Success(x) => println("unexpected: " + x)
           case Failure(x) => println("fails: " + x)
-        }
         case x => println("unexpected unexpected: " + x)
+        }
       } }
+    case Success(x) => println("what is that? " + x)
     case Failure(x) => println("fails: " + x)
   }
 
@@ -343,12 +357,12 @@ object ZeromqPairs extends App {
 
   //start an other node
 
-//    val node2 = system.actorOf(Props(new Node(registrationSocket, node2Socket)), name = "node2")
-//
-//    Thread.sleep(1.seconds.toMillis)
-//
-//    //issue an other command
-//    exec("rm -rf /")
+  val node2 = system.actorOf(Props(new Node(registrationSocket, node2Socket)), name = "node2")
+
+  Thread.sleep(1.seconds.toMillis)
+
+  //issue an other command
+  exec("rm -rf /")
 
 
   // Let it run for a while to see some output.
