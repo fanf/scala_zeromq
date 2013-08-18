@@ -5,12 +5,13 @@ import java.net.ServerSocket
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
-import scala.util.{ Failure, Success, Try }
+import scala.util.{ Failure, Success }
 
-import akka.actor._
+import akka.actor.{ Actor, ActorLogging, ActorRef, ActorSystem, PoisonPill, Props, actorRef2Scala }
 import akka.pattern.{ ask, pipe }
 import akka.serialization.SerializationExtension
-import akka.util.{ ByteString, Timeout }
+import akka.util.ByteString
+import akka.util.Timeout.durationToTimeout
 import akka.zeromq._
 
 /**
@@ -58,8 +59,6 @@ import akka.zeromq._
  */
 object ZeromqPairsSpec {
 
-
-
   case class ExecCommand(command: String)
   case class CommandResult(result: String)
   case object CommunicationError
@@ -93,7 +92,8 @@ object ZeromqPairsSpec {
 
     def receive = {
       case cmd:ExecCommand =>
-        (askNodes ? cmd)(5 seconds) pipeTo sender
+        log.error("User requested command " + cmd.command)
+        (askNodes ? cmd)(1 second) pipeTo sender
 
     }
 
@@ -178,6 +178,10 @@ object ZeromqPairsSpec {
     )
     val ser = SerializationExtension(context.system)
 
+    override def preStart() = {
+      log.info("Ready to send command to " + socket)
+    }
+
     //Better way to do that ?
     var responseCollector: ActorRef = null
 
@@ -212,10 +216,7 @@ object ZeromqPairsSpec {
         responseCollector = null
 
       case Connecting =>
-        log.error("New connection establish for registration by " + sender.path)
-
-      case Closed =>
-        log.error("Connection lost/closed")
+        log.info("New connection establish to ask commandto " + sender.path)
 
     }
   }
@@ -300,8 +301,6 @@ object ZeromqPairsSpec {
       case Connecting =>
         log.debug("New connection establish for asking to exec command by " + sender.path)
 
-      case Closed =>
-        log.error("Connection lost/closed")
     }
   }
 
@@ -349,24 +348,20 @@ object ZeromqPairs extends App {
   //first node
   val node1 = system.actorOf(Props(new Node(registrationSocket, node1Socket)), name = "node1")
 
-  Thread.sleep(2.seconds.toMillis)
-
-  //issue a command
-
-  exec("ls cmd")
 
   //start an other node
 
   val node2 = system.actorOf(Props(new Node(registrationSocket, node2Socket)), name = "node2")
 
-  Thread.sleep(1.seconds.toMillis)
 
+  Thread.sleep(2.seconds.toMillis)
   //issue an other command
   exec("rm -rf /")
 
 
   // Let it run for a while to see some output.
   // Don't do like this in real tests, this is only doc demonstration.
-  Thread.sleep(5.seconds.toMillis)
-  system.shutdown
+  Thread.sleep(6.seconds.toMillis)
+
+  forceShutdown
 }

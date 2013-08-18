@@ -24,9 +24,6 @@ object SimpleReqRepActors {
 
   case object Tick
 
-  case class RepeatAfterMe(say: String)
-  case class Answer(s:String)
-
   //a zmq server
   class Responder(socket:String) extends Actor with ActorLogging {
 
@@ -35,15 +32,12 @@ object SimpleReqRepActors {
       , Listener(self) // Responder will get message from ZeroMQ socket
       , Bind(socket)   // a service binds a socket and wait for connection
     )
-    val ser = SerializationExtension(context.system)
 
     def receive = {
       // the first frame is the topic, second is the message
-      case m: ZMQMessage if m.frames(0).utf8String == "repeat" =>
-        val RepeatAfterMe(repeat) = ser.deserialize(m.frames(1).toArray, classOf[RepeatAfterMe]).get
-
-        val repPayload = ser.serialize(Answer( s"I repeat ${repeat}")).get
-        repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
+      case m: ZMQMessage =>
+        val repeat = m.frames(0).utf8String
+        repSocket ! zmqMsg(s"I repeat ${repeat}")
     }
   }
 
@@ -57,27 +51,22 @@ object SimpleReqRepActors {
       , Listener(self)
       , Connect(socket)
     )
-    val ser = SerializationExtension(context.system)
-
 
     override def preStart() {
+      log.info("Starting client: " + self.path.name)
       self ! Tick
     }
 
     def receive: Receive = {
       case Tick =>
-
-        // use akka SerializationExtension to convert to bytes
-        val repeatPayload = ser.serialize(RepeatAfterMe("Say hello from " + self.path.name)).get
-
         // the first frame is the topic, second is the message
-        reqSocket ! ZMQMessage(ByteString("repeat"), ByteString(repeatPayload))
+        reqSocket ! zmqMsg(s"Say hello from ${self.path.name}")
 
-      case m: ZMQMessage if m.frames(0).utf8String == "answer" =>
-        val Answer(x) = ser.deserialize(m.frames(1).toArray, classOf[Answer]).get
-        log.info("Got answer: " + x)
+      case m: ZMQMessage =>
+        log.info("Got answer: " + m.frames(0).utf8String)
+        context.system.scheduler.scheduleOnce(100 milliseconds, self, Tick)
 
-        context.system.scheduler.scheduleOnce(1 seconds, self, Tick)
+      case Connecting => log.info("Connection from " + sender.path)
     }
   }
 }
@@ -90,27 +79,19 @@ object SimpleReqRep extends App {
   println("socket: " + socket)
 
   val client = system.actorOf(Props( new Requester(socket)), name = "client_1")
-  Thread.sleep(2.seconds.toMillis)
 
   system.actorOf(Props( new Responder(socket)), name = "server")
 
-  Thread.sleep(2.seconds.toMillis)
-
   system.actorOf(Props( new Requester(socket)), name = "client_2")
 
-
-  // Let it run for a while to see some output.
-  // Don't do like this in real tests, this is only doc demonstration.
   Thread.sleep(2.seconds.toMillis)
 
   println("Stopping client 1")
 
-  //stop the client
+  //stop client 1
   client ! PoisonPill
 
   Thread.sleep(1.seconds.toMillis)
 
-  println("Stopping everything")
-  //shutdown everything
-  system.shutdown
+  forceShutdown
 }

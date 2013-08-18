@@ -1,14 +1,13 @@
 package psug.zeromq
 
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.DurationInt
-import akka.actor.{ Actor, ActorLogging, ActorSystem, PoisonPill, Props, actorRef2Scala }
-import akka.serialization.SerializationExtension
-import akka.util.ByteString
-import akka.zeromq.{ Bind, Connect, Listener, SocketType, ZMQMessage, ZeroMQExtension }
-import java.util.zip.ZStreamRef
-import akka.actor.ActorRef
+import scala.util.{ Failure, Success }
+import akka.actor.{ Actor, ActorLogging, ActorRef, ActorSystem, Props, actorRef2Scala }
 import akka.pattern.ask
-import scala.util.Failure
+import akka.util.Timeout.durationToTimeout
+import akka.zeromq.{ Bind, Connect, Listener, SocketType, ZMQMessage, ZeroMQExtension }
+import akka.util.ByteString
 import scala.util.Success
 
 /**
@@ -18,21 +17,26 @@ import scala.util.Success
  *
  */
 object RealReqRepActors {
-  import akka.zeromq._
-  import akka.actor.Actor
-  import akka.actor.Props
-  import akka.actor.ActorLogging
-  import akka.serialization.SerializationExtension
-  import java.lang.management.ManagementFactory
-  import akka.pattern.ask
-  import scala.concurrent.ExecutionContext.Implicits.global
 
   case object Tick
 
-  case class RepeatAfterMe(say: String)
-  case class Answer(s:String)
+  /**
+   * We want to use the comman "ask" idiom, and don't
+   * know that underlining, we use ZeroMQ
+   */
+  class MessageCollector(socket: String) extends Actor with ActorLogging {
 
-  case object Plop
+    val client = context.actorOf(Props(new Requester(socket)), name = "client")
+
+    def receive: Receive = {
+      case Tick =>
+        ask(client, Tick)(5 second).onComplete {
+          case Failure(x) => log.error(x.getMessage)
+          case Success(ZMQMessage(x:Seq[ByteString])) => log.info("Collector got message: " + x(0).utf8String)
+          case Success(x) => log.error("Haven expected that: " + x)
+        }
+    }
+  }
 
   //a zmq server
   class Responder(socket:String) extends Actor with ActorLogging {
@@ -42,16 +46,14 @@ object RealReqRepActors {
       , Listener(self) // Responder will get message from ZeroMQ socket
       , Bind(socket)   // a service binds a socket and wait for connection
     )
-    val ser = SerializationExtension(context.system)
 
     def receive = {
       // the first frame is the topic, second is the message
-      case m: ZMQMessage if m.frames(0).utf8String == "repeat" =>
-        val RepeatAfterMe(repeat) = ser.deserialize(m.frames(1).toArray, classOf[RepeatAfterMe]).get
+      case m: ZMQMessage =>
+        val repeat = m.frames(0).utf8String
 
         log.info("Server was asked to repeat: " + repeat)
-        val repPayload = ser.serialize(Answer( s"I repeat ${repeat}")).get
-        repSocket ! ZMQMessage(ByteString("answer"), ByteString( repPayload ))
+        repSocket ! zmqMsg(s"I repeat ${repeat}")
     }
   }
 
@@ -65,40 +67,28 @@ object RealReqRepActors {
       , Listener(self)
       , Connect(socket)
     )
-    val ser = SerializationExtension(context.system)
 
     var responseCollector: ActorRef = null
+
+    override def preStart() = {
+      log.info("Starting requester: " + self.path.name)
+    }
 
     def receive: Receive = {
       case Tick =>
 
         responseCollector = sender
-        // use akka SerializationExtension to convert to bytes
-        val repeatPayload = ser.serialize(RepeatAfterMe("Say hello!")).get
+        reqSocket ! zmqMsg("Say hello!")
 
-        // the first frame is the topic, second is the message
-        reqSocket ! ZMQMessage(ByteString("repeat"), ByteString(repeatPayload))
-
-      case m: ZMQMessage if m.frames(0).utf8String == "answer" =>
-        val Answer(x) = ser.deserialize(m.frames(1).toArray, classOf[Answer]).get
+      case m: ZMQMessage =>
+        val x  = m.frames(0).utf8String
         log.info("client got response, forwarding to collector")
-        responseCollector ! Answer(x)
+        responseCollector ! zmqMsg(x)
         responseCollector = null
     }
   }
 
-  class MessageCollector(socket: String) extends Actor with ActorLogging {
 
-    val client = context.actorOf(Props(new Requester(socket)), name = "client")
-
-    def receive: Receive = {
-      case Tick =>
-        ask(client, Tick)(5 second).onComplete {
-          case Failure(x) => log.error(x.getMessage)
-          case Success(x) => log.info("Collector got message: " + x)
-        }
-    }
-  }
 
 }
 
@@ -106,7 +96,7 @@ object RealReqRep extends App {
   import RealReqRepActors._
 
   implicit val system = ActorSystem("zeromq")
-  val socket = "tcp://127.0.0.1:30987"
+  val socket = "tcp://127.0.0.1:" + nextPort
 
   val messageCollector = system.actorOf(Props( new MessageCollector(socket)), name = "client")
 
@@ -118,7 +108,6 @@ object RealReqRep extends App {
 
 
   Thread.sleep(2.seconds.toMillis)
-  println("Stopping everything")
-  //shutdown everything
-  system.shutdown
+
+  forceShutdown
 }

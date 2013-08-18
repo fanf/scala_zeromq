@@ -23,8 +23,6 @@ import akka.zeromq._
 object SimplestReqRep extends App {
   //Test actor that prints all ZEROMQ message it gets
 
-  def msg(s:String) = ZMQMessage(ByteString(s))
-
   class Listener extends Actor with ActorLogging {
     def receive = {
       case m: ZMQMessage => log.info("Got message: " + m.frames(0).utf8String)
@@ -56,34 +54,37 @@ object SimplestReqRep extends App {
     , Connect(socket)
   )
 
-  client1 ! msg("hello from client1")
+  client1 ! zmqMsg("hello from client1")
   Thread.sleep(1.seconds.toMillis)
 
-  server ! msg("hi")
+  server ! zmqMsg("hi")
   Thread.sleep(1.seconds.toMillis)
 
-  client1 ! msg("howdy?")
+  client1 ! zmqMsg("howdy?")
   Thread.sleep(1.seconds.toMillis)
 
-  server ! msg("OK, thanks you")
+  server ! zmqMsg("OK, thanks you")
   Thread.sleep(1.seconds.toMillis)
 
-  client2 ! msg("Wow, what's up server")
+  client2 ! zmqMsg("Wow, what's up server")
   Thread.sleep(1.seconds.toMillis)
 
-  server ! msg("talking to client1")
+  server ! zmqMsg("talking to client1")
   Thread.sleep(1.seconds.toMillis)
 
-  client2 ! msg("You don't talk to other! /me rage quit")
+  client2 ! zmqMsg("You don't talk to other! /me rage quit")
   system.stop(client2)
   Thread.sleep(1.seconds.toMillis)
 
 
-  server ! msg("ho, client2...")
+  server ! zmqMsg("ho, client2...")
   Thread.sleep(1.seconds.toMillis)
 
 
-  println("Stopping everything")
-  //shutdown everything
-  system.shutdown
+  /// BE VERY CAREFUL ///
+  // that won't do anything (no dead letter, nothing)
+  // client1 ! "plop"
+
+
+  forceShutdown
 }
