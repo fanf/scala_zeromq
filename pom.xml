@@ -107,7 +107,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <scala-maven-plugin-version>3.1.0</scala-maven-plugin-version>
     <scala-binary-version>2.10</scala-binary-version>
-    <scala-version>2.10.2</scala-version>
+    <scala-version>2.10.1</scala-version>
     <specs2-version>1.13</specs2-version>
     <akka-version>2.2.0</akka-version>
   </properties>

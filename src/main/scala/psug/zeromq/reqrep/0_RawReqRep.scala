@@ -4,12 +4,20 @@ package reqrep
 
 import org.zeromq.ZMQ
 
+/**
+ * Simple implementation of a request / response socket.
+ * Yes, that's a server with clients.
+ */
+
+/**
+ * The server.
+ */
 object RawReqRepServer extends App {
 
   val context = ZMQ.context(1)
 
   val server = context.socket(ZMQ.REP)
-  server.bind("tcp://127.0.0.1:5000")
+  server.bind("tcp://*:5000")
 
   println("Waiting for connections...")
 
@@ -32,7 +40,9 @@ trait RawReqRepClient {
   println(s"Client ${name} starts to send message to server")
 
   while(true) {
+    //first request
     val request = client.send(("Hello from " + name).getBytes, 0)
+    //then receive. Any other order will lead to "bad socket state"
     client.recv(0)
     Thread.sleep(1000)
   }

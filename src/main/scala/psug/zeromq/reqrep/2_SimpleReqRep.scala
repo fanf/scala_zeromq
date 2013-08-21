@@ -13,8 +13,8 @@ import akka.zeromq.{ Bind, Connect, Connecting, Listener, SocketType, ZMQMessage
  * Demonstrate how simple Request / Response works
  * in ZeroMQ / AKKA.
  *
- * In particular, we are going to see how multiple client
- * can connect to a server.
+ * Now, we encapsulate ZeroMQ socket actor into other
+ * actor.
  *
  */
 object SimpleReqRepActors {

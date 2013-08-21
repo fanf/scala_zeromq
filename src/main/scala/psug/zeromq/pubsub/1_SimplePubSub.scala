@@ -10,24 +10,21 @@ import akka.actor.PoisonPill
 import akka.util.ByteString
 
 /**
- * Goal of the exercice:
  *
- * Demonstrate how simple Request / Response works
- * in ZeroMQ / AKKA.
- *
- * In particular, we are going to see how multiple client
- * can connect to a server.
+ * Integration of ZeroMQ / AKKA with PUB/SUB
  *
  */
 object SimplePubSubActors {
   case object Tick
 
-  //a zmq server
+  //a zmq publisher actor
   class Server(socket:String) extends Actor with ActorLogging {
 
+    //This is how are created new ZMQ sockets with AKKA
+    //It is itself an actor
     val pubSocket = ZeroMQExtension(context.system).newSocket(
-        SocketType.Pub
-      , Bind(socket)
+        SocketType.Pub //publisher socket
+      , Bind(socket) //
     )
 
     override def preStart() {
@@ -39,8 +36,10 @@ object SimplePubSubActors {
 
     def receive: Receive = {
       case Tick =>
-        // the first frame is the topic, second is the message
         val msg = s"${self.path.name} say: ${i}"
+        // Publish a message.
+        // The first frame is the topic, second is the message.
+        // Never EVER forget ZMQMessage, else nothing will happen
         pubSocket ! ZMQMessage( ByteString((i%2).toString), ByteString(msg) )
         i += 1
         context.system.scheduler.scheduleOnce(200 milliseconds, self, Tick)
@@ -48,6 +47,7 @@ object SimplePubSubActors {
     }
   }
 
+  //the client actor
   class Client(socket:String, subscribe0 : Boolean = false, subscribe1: Boolean = false) extends Actor with ActorLogging {
 
     val socketOptions = Seq(
@@ -78,13 +78,14 @@ object SimplePubSub extends App {
   import SimplePubSubActors._
 
   implicit val system = ActorSystem("zeromq")
-  val socket = "tcp://127.0.0.1:" + nextPort
-  println("socket: " + socket)
+  val socket = "tcp://*:5000"
 
   val client = system.actorOf(Props( new Client(socket, true, true)), name = "client_1")
 
+  //server can be created after client
   system.actorOf(Props( new Server(socket)), name = "server")
 
+  //a second actor
   system.actorOf(Props( new Client(socket, true, true)), name = "client_2")
 
   Thread.sleep(20.seconds.toMillis)
@@ -96,5 +97,5 @@ object SimplePubSub extends App {
 
   Thread.sleep(1.seconds.toMillis)
 
-  forceShutdown
+//  forceShutdown
 }
